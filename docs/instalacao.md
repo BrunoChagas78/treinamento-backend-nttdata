@@ -2,6 +2,8 @@
 
 Este guia prepara uma máquina para executar o projeto, enviar pedidos pelo Postman, consultar o PostgreSQL e executar os testes. O passo a passo principal usa **Windows com PowerShell, Docker Desktop e contêineres Linux**.
 
+Para instalar o Python na sua máquina, consulte o [passo a passo de instalação do Python 3.13, pip e ambiente virtual](#12-instalar-python-313-pip-e-ambiente-virtual-no-windows).
+
 As versões da aplicação abaixo foram conferidas no código do projeto. Os procedimentos externos foram consultados em **6 de novembro de 2026**; nomes de telas e condições comerciais podem mudar.
 
 ## 1. O que será instalado
@@ -336,13 +338,44 @@ Os testes criam pedidos e mensagens. Use uma instalação individual e evite pau
 docker compose --profile tools run --rm lab resume
 ```
 
-## 12. Instalar Python no Windows para desenvolvimento, opcional
+## 12. Instalar Python 3.13, pip e ambiente virtual no Windows
 
-Faça esta etapa se quiser executar testes unitários e scripts diretamente no Windows. O Docker continuará necessário para provisionar as Lambdas e para os testes funcionais.
+Instale o Python no Windows para desenvolver, executar testes unitários e usar os scripts diretamente na sua máquina. Essa instalação é opcional para quem executa tudo pelo Docker. O Docker continuará necessário para provisionar as Lambdas e para os testes funcionais.
 
-### Python 3.13, pip e ambiente virtual
+### 12.1. Baixar e instalar o Python
 
-Instale o **Python 3.13 de 64 bits** pelos [downloads oficiais para Windows](https://www.python.org/downloads/windows/). No instalador tradicional, habilite `pip`, o launcher `py` e a opção de adicionar Python ao `PATH`. Se usar o gerenciador de instalação Python, instale a versão 3.13 por ele. Confira as [orientações do Python para Windows](https://docs.python.org/3.13/using/windows.html).
+1. Acesse os [downloads oficiais do Python para Windows](https://www.python.org/downloads/windows/).
+2. Localize uma versão **Python 3.13.x** e escolha **Windows installer (64-bit)** para a máquina Intel/AMD deste guia. Use a linha 3.13 para acompanhar o runtime do projeto.
+3. Execute o arquivo `.exe` baixado.
+4. Na primeira tela, marque **Add python.exe to PATH** para disponibilizar o comando no terminal.
+5. Selecione **Customize installation** e mantenha **pip** e **Python Launcher (`py`)** habilitados. Avance e conclua com **Install**.
+6. Aguarde a confirmação de sucesso e feche o instalador.
+7. Feche os terminais antigos e abra uma nova janela do PowerShell para carregar o `PATH` atualizado.
+
+O `pip` instala bibliotecas e o launcher `py` seleciona a versão do Python. Referência: [instalador e opções do Python 3.13 para Windows](https://docs.python.org/3.13/using/windows.html).
+
+### 12.2. Confirmar a instalação e o pip
+
+Execute no novo PowerShell:
+
+```powershell
+py -3.13 --version
+py -3.13 -m pip --version
+py -3.13 -c "import sys; print(sys.executable)"
+```
+
+O primeiro comando deve mostrar `Python 3.13.x`; o segundo, a versão do pip associada ao Python 3.13; o terceiro, o caminho do interpretador instalado. O `x` representa a versão de correção escolhida.
+
+Se o pip não estiver disponível nessa instalação, execute e confira novamente:
+
+```powershell
+py -3.13 -m ensurepip --upgrade
+py -3.13 -m pip --version
+```
+
+Se `py` não for reconhecido, reabra o instalador e habilite o launcher. Se `python` abrir a Microsoft Store ou apontar para outra versão, continue usando `py -3.13` para selecionar explicitamente o interpretador do projeto.
+
+### 12.3. Criar o ambiente virtual e instalar as dependências
 
 Abra um novo PowerShell na raiz do projeto:
 
@@ -363,7 +396,7 @@ py -3.13 -m venv .venv
 
 Os exemplos chamam o executável da `.venv` diretamente e funcionam sem ativar scripts do PowerShell. Ativar o ambiente é opcional: `.\.venv\Scripts\Activate.ps1`; após a ativação, use `python` e saia com `deactivate`. Se a política da máquina bloquear scripts, continue usando o caminho explícito, sem alterar a política. Referência: [ambientes virtuais com venv](https://docs.python.org/3.13/library/venv.html).
 
-### Scripts e testes funcionais executados no Windows
+### 12.4. Scripts e testes funcionais executados no Windows
 
 O Compose já configura as variáveis dentro dos contêineres. Para executar ferramentas no Windows, defina as variáveis na **sessão atual**, depois de subir e provisionar o laboratório:
 
@@ -395,7 +428,7 @@ $env:BASE_URL = $labConfig.base_url
 
 `ORDERS_QUEUE_URL` e `ENABLE_FAULTS` são configuradas pelo provisionador no ambiente das Lambdas. Você não precisa defini-las para usar a API, o script de envio ou os testes acima. Reabra a sessão para descartar as variáveis temporárias ao encerrar.
 
-### Visual Studio Code, opcional
+### 12.5. Visual Studio Code, opcional
 
 Instale pelo [site oficial do VS Code para Windows](https://code.visualstudio.com/docs/setup/windows), abra a pasta do projeto e instale a extensão **Python**, da Microsoft, se for desenvolver. Execute **Python: Select Interpreter** na paleta de comandos e selecione `.venv\Scripts\python.exe`. O editor é uma conveniência e não é exigido para executar o laboratório.
 

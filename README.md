@@ -17,6 +17,8 @@ flowchart LR
 
 Para preparar uma máquina do zero, siga o [guia completo de instalação](docs/instalacao.md): Windows/WSL 2, Docker, Git, criação de conta e token LocalStack, Postman, banco e dependências Python.
 
+O guia também inclui a [instalação do Python 3.13 no Windows](docs/instalacao.md#12-instalar-python-313-pip-e-ambiente-virtual-no-windows), com configuração do PATH, pip e ambiente virtual.
+
 Pré-requisitos: Docker Desktop com engine Linux ativo, Docker Compose e licença LocalStack com os serviços usados pelo projeto.
 
 Copie `.env.example` para `.env` na raiz, se ainda não houver esse arquivo, e preencha seu token:
