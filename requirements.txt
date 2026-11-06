@@ -1,0 +1,4 @@
+boto3==1.40.61
+psycopg[binary]==3.2.10
+pydantic==2.13.4
+

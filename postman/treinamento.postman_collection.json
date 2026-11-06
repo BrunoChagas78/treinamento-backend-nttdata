@@ -1,0 +1,2316 @@
+{
+  "info": {
+    "name": "Treinamento | Pedidos - sucesso, falhas e recuperação",
+    "description": "Importe .local/postman.local.json e selecione o ambiente. Execute as pastas na ordem ou separadamente; cada cenário de processamento deve começar pelo seu POST. Use Collection Runner com delay de 1000 ms. Falhas HTTP esperadas aprovam quando status e erro correspondem ao contrato. Os GETs de sucesso/retry fazem polling limitado; Send manual não repete automaticamente. Os cenários de DLQ exigem confirmação adicional por SQS e SQL. Guia: postman/README.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "",
+      "type": "string",
+      "description": "Importar e selecionar o ambiente .local/postman.local.json."
+    },
+    {
+      "key": "customer_id",
+      "value": "aluno-01",
+      "type": "string"
+    },
+    {
+      "key": "poll_timeout_ms",
+      "value": "90000",
+      "type": "string"
+    },
+    {
+      "key": "retry_timeout_ms",
+      "value": "150000",
+      "type": "string"
+    },
+    {
+      "key": "max_poll_attempts",
+      "value": "180",
+      "type": "string"
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const baseUrl = pm.variables.get('base_url');",
+          "if (!baseUrl || !/^https?:\\/\\//.test(baseUrl)) {",
+          "    throw new Error('Selecione o ambiente Treinamento local ou configure base_url nas variáveis da coleção.');",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "01 | Sucesso",
+      "description": "Executar na ordem: saúde, criação, processamento, reenvio e consulta. Não comprova sozinho a contagem de duplicidades no banco.",
+      "item": [
+        {
+          "id": "4775d174-a439-530c-9b34-249af52bebb5",
+          "name": "01.01 [200] Verificar saúde",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/health",
+            "description": "Confirma acesso ao PostgreSQL e à fila SQS."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Dependências disponíveis', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 - Resposta esperada",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/health",
+                "description": "Confirma acesso ao PostgreSQL e à fila SQS."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"ok\"\n}"
+            }
+          ]
+        },
+        {
+          "id": "9ecbac24-40eb-552e-8285-9fe35bd076b6",
+          "name": "01.02 [202] Criar pedido válido",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "description": "Gera um UUID novo em cada envio e salva success_order_id. 202 comprova envio à fila; a próxima requisição comprova processamento.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_id\": \"{{success_order_id}}\",\n  \"customer_id\": \"{{success_customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('success_order_id', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.collectionVariables.set('success_customer_id', pm.variables.get('customer_id'));",
+                  "pm.collectionVariables.set('success_poll_count', 0);",
+                  "pm.collectionVariables.unset('success_poll_deadline');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 202: mensagem aceita na fila', () => pm.response.to.have.status(202));",
+                  "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                  "pm.test('Identificador e estado de aceitação', () => {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.order_id).to.eql(pm.collectionVariables.get('success_order_id'));",
+                  "    pm.expect(body.status).to.eql('ACCEPTED');",
+                  "});",
+                  "pm.test('Location identifica o pedido', () => {",
+                  "    pm.expect(pm.response.headers.get('Location')).to.eql('/orders/' + pm.collectionVariables.get('success_order_id'));",
+                  "});",
+                  "if (pm.response.code !== 202) {",
+                  "    pm.execution.setNextRequest(null);",
+                  "}",
+                  "",
+                  "pm.collectionVariables.set('success_poll_deadline', Date.now() + Number(pm.variables.get('poll_timeout_ms')));"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "202 - Resposta esperada",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "Gera um UUID novo em cada envio e salva success_order_id. 202 comprova envio à fila; a próxima requisição comprova processamento.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{success_order_id}}\",\n  \"customer_id\": \"{{success_customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Accepted",
+              "code": 202,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Location",
+                  "value": "/orders/00000000-0000-0000-0000-000000000001"
+                }
+              ],
+              "body": "{\n  \"order_id\": \"00000000-0000-0000-0000-000000000001\",\n  \"status\": \"ACCEPTED\"\n}"
+            }
+          ]
+        },
+        {
+          "id": "3bd82256-4217-5513-9987-d57217e175e6",
+          "name": "01.03 [200] Aguardar e consultar pedido",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders/{{success_order_id}}",
+            "description": "Execute após 01.02. No Runner, repete GET enquanto houver 404 dentro do prazo. Use delay de 1000 ms. Send manual exige reenviar o GET."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('success_order_id')) {",
+                  "    throw new Error('Execute primeiro o POST deste cenário para gerar o order_id.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const attempt = Number(pm.collectionVariables.get('success_poll_count') || 0) + 1;",
+                  "pm.collectionVariables.set('success_poll_count', attempt);",
+                  "const deadline = Number(pm.collectionVariables.get('success_poll_deadline') || 0);",
+                  "const maxAttempts = Number(pm.variables.get('max_poll_attempts'));",
+                  "if (pm.response.code === 404 && Date.now() < deadline && attempt < maxAttempts) {",
+                  "    pm.test('Ainda pendente dentro do prazo', () => {",
+                  "        pm.expect(pm.response.json().error).to.eql('order_not_found');",
+                  "    });",
+                  "    console.info('Aguardando processamento; tentativa', attempt);",
+                  "    pm.execution.setNextRequest(pm.info.requestId);",
+                  "} else {",
+                  "",
+                  "pm.test('HTTP 200: pedido processado', () => pm.response.to.have.status(200));",
+                  "pm.test('Dados persistidos correspondem ao pedido', () => {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.order_id).to.eql(pm.collectionVariables.get('success_order_id'));",
+                  "    pm.expect(body.customer_id).to.eql(pm.collectionVariables.get('success_customer_id'));",
+                  "    pm.expect(Number(body.amount)).to.eql(42.5);",
+                  "    pm.expect(body.currency).to.eql('BRL');",
+                  "    pm.expect(body.status).to.eql('PROCESSED');",
+                  "    pm.expect(body.processed_at).to.be.a('string').and.not.empty;",
+                  "    pm.expect(Number.isNaN(Date.parse(body.processed_at))).to.eql(false);",
+                  "    pm.expect(body.receive_count).to.be.at.least(1);",
+                  "});",
+                  "if (pm.response.code !== 200) {",
+                  "    pm.execution.setNextRequest(null);",
+                  "}",
+                  "",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 - Resposta esperada",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders/{{success_order_id}}",
+                "description": "Execute após 01.02. No Runner, repete GET enquanto houver 404 dentro do prazo. Use delay de 1000 ms. Send manual exige reenviar o GET."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"order_id\": \"00000000-0000-0000-0000-000000000001\",\n  \"customer_id\": \"aluno-01\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"status\": \"PROCESSED\",\n  \"receive_count\": 1,\n  \"processed_at\": \"2026-11-05 15:30:00+00:00\"\n}"
+            }
+          ]
+        },
+        {
+          "id": "5f425e31-d0fe-512b-9020-0f9546edfd89",
+          "name": "01.04 [202] Reenviar o mesmo pedido",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "description": "Reutiliza o ID e os dados do cenário de sucesso. Deve ser aceito novamente. Confirme idempotência por SQL em orders e order_receipts; o HTTP 202 sozinho não a comprova.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_id\": \"{{success_order_id}}\",\n  \"customer_id\": \"{{success_customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('success_order_id')) {",
+                  "    throw new Error('Execute primeiro o POST deste cenário para gerar o order_id.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 202: mensagem aceita na fila', () => pm.response.to.have.status(202));",
+                  "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                  "pm.test('Identificador e estado de aceitação', () => {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.order_id).to.eql(pm.collectionVariables.get('success_order_id'));",
+                  "    pm.expect(body.status).to.eql('ACCEPTED');",
+                  "});",
+                  "pm.test('Location identifica o pedido', () => {",
+                  "    pm.expect(pm.response.headers.get('Location')).to.eql('/orders/' + pm.collectionVariables.get('success_order_id'));",
+                  "});",
+                  "if (pm.response.code !== 202) {",
+                  "    pm.execution.setNextRequest(null);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "202 - Resposta esperada",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "Reutiliza o ID e os dados do cenário de sucesso. Deve ser aceito novamente. Confirme idempotência por SQL em orders e order_receipts; o HTTP 202 sozinho não a comprova.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{success_order_id}}\",\n  \"customer_id\": \"{{success_customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Accepted",
+              "code": 202,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Location",
+                  "value": "/orders/00000000-0000-0000-0000-000000000001"
+                }
+              ],
+              "body": "{\n  \"order_id\": \"00000000-0000-0000-0000-000000000001\",\n  \"status\": \"ACCEPTED\"\n}"
+            }
+          ]
+        },
+        {
+          "id": "a46fe80b-6c4a-5221-8990-96de715670a9",
+          "name": "01.05 [200] Consultar pedido após reenvio",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders/{{success_order_id}}",
+            "description": "Confirma que o pedido continua consultável com os mesmos dados. A contagem de pedidos e a conclusão da entrega duplicada devem ser verificadas por SQL ou pela suíte PyTest."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('success_order_id')) {",
+                  "    throw new Error('Execute primeiro o POST deste cenário para gerar o order_id.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200: pedido processado', () => pm.response.to.have.status(200));",
+                  "pm.test('Dados persistidos correspondem ao pedido', () => {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.order_id).to.eql(pm.collectionVariables.get('success_order_id'));",
+                  "    pm.expect(body.customer_id).to.eql(pm.collectionVariables.get('success_customer_id'));",
+                  "    pm.expect(Number(body.amount)).to.eql(42.5);",
+                  "    pm.expect(body.currency).to.eql('BRL');",
+                  "    pm.expect(body.status).to.eql('PROCESSED');",
+                  "    pm.expect(body.processed_at).to.be.a('string').and.not.empty;",
+                  "    pm.expect(Number.isNaN(Date.parse(body.processed_at))).to.eql(false);",
+                  "    pm.expect(body.receive_count).to.be.at.least(1);",
+                  "});",
+                  "if (pm.response.code !== 200) {",
+                  "    pm.execution.setNextRequest(null);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 - Resposta esperada",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders/{{success_order_id}}",
+                "description": "Confirma que o pedido continua consultável com os mesmos dados. A contagem de pedidos e a conclusão da entrega duplicada devem ser verificadas por SQL ou pela suíte PyTest."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"order_id\": \"00000000-0000-0000-0000-000000000001\",\n  \"customer_id\": \"aluno-01\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"status\": \"PROCESSED\",\n  \"receive_count\": 1,\n  \"processed_at\": \"2026-11-05 15:30:00+00:00\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 | Falhas HTTP esperadas",
+      "description": "Casos independentes: uma resposta de erro correta é um teste aprovado. Não precisam criar pedido válido antes.",
+      "item": [
+        {
+          "name": "02.01 | 400 - Validação de entrada",
+          "description": "Campos, valores, JSON e UUID inválidos. Todos esperam invalid_request.",
+          "item": [
+            {
+              "id": "06027679-5b72-5be2-abfa-2960ff35de7c",
+              "name": "02.01.01 [400] Valor zero",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "O valor precisa ser maior que zero.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"0\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "O valor precisa ser maior que zero.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"0\",\n  \"currency\": \"BRL\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "2535f52f-dba7-5914-bee9-ec96dbb3fd84",
+              "name": "02.01.02 [400] Valor negativo",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "Valores negativos são rejeitados.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"-1.00\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "Valores negativos são rejeitados.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"-1.00\",\n  \"currency\": \"BRL\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "94d1c1be-4242-5531-bf03-4d5647e5f3a4",
+              "name": "02.01.03 [400] Mais de duas casas decimais",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "Precisão monetária limitada a duas casas.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"42.501\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "Precisão monetária limitada a duas casas.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"42.501\",\n  \"currency\": \"BRL\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "45678440-6257-50f0-b8ad-a404b5e6100a",
+              "name": "02.01.04 [400] Valor acima do limite",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "NUMERIC(12,2): no máximo dez dígitos inteiros e dois decimais.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"10000000000.00\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "NUMERIC(12,2): no máximo dez dígitos inteiros e dois decimais.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"10000000000.00\",\n  \"currency\": \"BRL\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "6265ec00-6d1a-5fc6-9907-93a38ef57495",
+              "name": "02.01.05 [400] Moeda não suportada",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "O treinamento aceita somente BRL.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"USD\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "O treinamento aceita somente BRL.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"USD\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "e9fa0d81-5fb5-5694-9c0d-0347ecce6c1e",
+              "name": "02.01.06 [400] Cliente vazio",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "customer_id não pode estar vazio.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "customer_id não pode estar vazio.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "5eabbabf-7170-548e-9754-2bf5a57df714",
+              "name": "02.01.07 [400] Cliente somente com espaços",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "customer_id precisa conter algum caractere que não seja espaço.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"   \",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "customer_id precisa conter algum caractere que não seja espaço.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"   \",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "97aa0dc8-f64a-5bdf-85d2-e53b1008fb0e",
+              "name": "02.01.08 [400] Cliente acima de 100 caracteres",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "O limite de customer_id é 100 caracteres.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "O limite de customer_id é 100 caracteres.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "d6a9b8a5-e39b-5094-82a0-26c28be1fb75",
+              "name": "02.01.09 [400] UUID inválido no corpo",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "order_id deve ser um UUID.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"pedido-invalido\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "order_id deve ser um UUID.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"pedido-invalido\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "a4ff4314-c154-570e-899b-e5f9411286c0",
+              "name": "02.01.10 [400] Campo obrigatório ausente",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "O campo amount é obrigatório.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"currency\": \"BRL\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "O campo amount é obrigatório.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"currency\": \"BRL\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "4c48e4c5-31e6-59f3-89ae-0f286616d0e4",
+              "name": "02.01.11 [400] Campo não previsto",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "O modelo rejeita campos extras.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"campo_extra\": \"não permitido\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "O modelo rejeita campos extras.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"campo_extra\": \"não permitido\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "37d527f2-c33b-52c6-967f-a3119759dc71",
+              "name": "02.01.12 [400] Modo de falha inválido",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "Somente none, once e permanent são aceitos.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"failure_mode\": \"unknown\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('invalid_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "Somente none, once e permanent são aceitos.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{invalid_order_id}}\",\n  \"customer_id\": \"{{customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"failure_mode\": \"unknown\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "c33d3f51-7091-5a46-b25d-cd1c9ba8bade",
+              "name": "02.01.13 [400] JSON malformado",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "Corpo incompleto: não é um JSON válido.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"order_id\":",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "Corpo incompleto: não é um JSON válido.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\"order_id\":",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "b06e0c3f-0fca-5006-bbc5-937141700084",
+              "name": "02.01.14 [400] UUID inválido na consulta",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders/uuid-invalido",
+                "description": "Distingue identificador inválido (400) de pedido inexistente (404)."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 400 esperado', () => pm.response.to.have.status(400));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: invalid_request', () => pm.expect(pm.response.json().error).to.eql('invalid_request'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "400 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders/uuid-invalido",
+                    "description": "Distingue identificador inválido (400) de pedido inexistente (404)."
+                  },
+                  "status": "Bad Request",
+                  "code": 400,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"invalid_request\"\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "02.02 | 404 - Recursos não encontrados",
+          "description": "Diferencia pedido inexistente de rota inexistente.",
+          "item": [
+            {
+              "id": "c236ea81-0203-5276-9f2f-457b1c5e5caf",
+              "name": "02.02.01 [404] Pedido inexistente",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders/{{unknown_order_id}}",
+                "description": "Gera um UUID válido que não foi publicado. Não depende do cenário de sucesso."
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('unknown_order_id', pm.variables.replaceIn('{{$guid}}'));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 404 esperado', () => pm.response.to.have.status(404));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: order_not_found', () => pm.expect(pm.response.json().error).to.eql('order_not_found'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "404 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders/{{unknown_order_id}}",
+                    "description": "Gera um UUID válido que não foi publicado. Não depende do cenário de sucesso."
+                  },
+                  "status": "Not Found",
+                  "code": 404,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"order_not_found\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "417f4b22-ef59-5b42-af57-f7d0f28e4390",
+              "name": "02.02.02 [404] Rota inexistente",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/rota-inexistente",
+                "description": "A rota é encaminhada ao handler, que retorna route_not_found."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 404 esperado', () => pm.response.to.have.status(404));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: route_not_found', () => pm.expect(pm.response.json().error).to.eql('route_not_found'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "404 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/rota-inexistente",
+                    "description": "A rota é encaminhada ao handler, que retorna route_not_found."
+                  },
+                  "status": "Not Found",
+                  "code": 404,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"route_not_found\"\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "02.03 | 413 - Tamanho do payload",
+          "description": "Limite didático de 64 KiB.",
+          "item": [
+            {
+              "id": "e48a0005-7cd7-5662-a8a7-6670b6b619e4",
+              "name": "02.03.01 [413] Payload maior que 64 KiB",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "Gera um corpo ASCII acima de 65.536 bytes antes do envio. O limite de tamanho é verificado antes da validação de campos.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{{oversized_body}}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.variables.set('oversized_body', JSON.stringify({",
+                      "    order_id: pm.variables.replaceIn('{{$guid}}'),",
+                      "    customer_id: 'x'.repeat(65537),",
+                      "    amount: '42.50',",
+                      "    currency: 'BRL'",
+                      "}));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 413 esperado', () => pm.response.to.have.status(413));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: payload_too_large', () => pm.expect(pm.response.json().error).to.eql('payload_too_large'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "413 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "Gera um corpo ASCII acima de 65.536 bytes antes do envio. O limite de tamanho é verificado antes da validação de campos.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{{oversized_body}}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Payload Too Large",
+                  "code": 413,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"payload_too_large\"\n}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 | Falhas de processamento assíncrono",
+      "description": "O POST retorna 202 também quando a falha ocorre depois, no Worker. Cada subpasta tem UUID próprio e pode ser executada separadamente.",
+      "item": [
+        {
+          "name": "03.01 | Falha temporária - retry e recuperação",
+          "description": "Execute POST e depois GET. O GET aguarda a nova entrega e confirma receive_count >= 2.",
+          "item": [
+            {
+              "id": "0c1a7aa2-cddb-544a-b9fb-d6aa7d114064",
+              "name": "03.01.01 [202] Criar pedido com falha temporária",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "failure_mode=once faz a primeira entrega falhar. Habilitado pelo provisionador local. Salva retry_order_id, sem alterar o pedido de sucesso.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{retry_order_id}}\",\n  \"customer_id\": \"{{retry_customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"failure_mode\": \"once\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.collectionVariables.set('retry_order_id', pm.variables.replaceIn('{{$guid}}'));",
+                      "pm.collectionVariables.set('retry_customer_id', pm.variables.get('customer_id'));",
+                      "pm.collectionVariables.set('retry_poll_count', 0);",
+                      "pm.collectionVariables.unset('retry_poll_deadline');"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 202: mensagem aceita na fila', () => pm.response.to.have.status(202));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Identificador e estado de aceitação', () => {",
+                      "    const body = pm.response.json();",
+                      "    pm.expect(body.order_id).to.eql(pm.collectionVariables.get('retry_order_id'));",
+                      "    pm.expect(body.status).to.eql('ACCEPTED');",
+                      "});",
+                      "pm.test('Location identifica o pedido', () => {",
+                      "    pm.expect(pm.response.headers.get('Location')).to.eql('/orders/' + pm.collectionVariables.get('retry_order_id'));",
+                      "});",
+                      "if (pm.response.code !== 202) {",
+                      "    pm.execution.setNextRequest(null);",
+                      "}",
+                      "",
+                      "pm.collectionVariables.set('retry_poll_deadline', Date.now() + Number(pm.variables.get('retry_timeout_ms')));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "202 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "failure_mode=once faz a primeira entrega falhar. Habilitado pelo provisionador local. Salva retry_order_id, sem alterar o pedido de sucesso.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{retry_order_id}}\",\n  \"customer_id\": \"{{retry_customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"failure_mode\": \"once\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Accepted",
+                  "code": 202,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    },
+                    {
+                      "key": "Location",
+                      "value": "/orders/00000000-0000-0000-0000-000000000001"
+                    }
+                  ],
+                  "body": "{\n  \"order_id\": \"00000000-0000-0000-0000-000000000001\",\n  \"status\": \"ACCEPTED\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "e9b86bed-c549-54a9-9e9b-266289723fc9",
+              "name": "03.01.02 [200] Confirmar recuperação por retry",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders/{{retry_order_id}}",
+                "description": "No Runner, aguarda até 150 s e exige receive_count >= 2. O visibility timeout é de 60 s. Execute após 03.01.01."
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (!pm.collectionVariables.get('retry_order_id')) {",
+                      "    throw new Error('Execute primeiro o POST deste cenário para gerar o order_id.');",
+                      "}"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "const attempt = Number(pm.collectionVariables.get('retry_poll_count') || 0) + 1;",
+                      "pm.collectionVariables.set('retry_poll_count', attempt);",
+                      "const deadline = Number(pm.collectionVariables.get('retry_poll_deadline') || 0);",
+                      "const maxAttempts = Number(pm.variables.get('max_poll_attempts'));",
+                      "if (pm.response.code === 404 && Date.now() < deadline && attempt < maxAttempts) {",
+                      "    pm.test('Ainda pendente dentro do prazo', () => {",
+                      "        pm.expect(pm.response.json().error).to.eql('order_not_found');",
+                      "    });",
+                      "    console.info('Aguardando processamento; tentativa', attempt);",
+                      "    pm.execution.setNextRequest(pm.info.requestId);",
+                      "} else {",
+                      "",
+                      "pm.test('HTTP 200: pedido processado', () => pm.response.to.have.status(200));",
+                      "pm.test('Dados persistidos correspondem ao pedido', () => {",
+                      "    const body = pm.response.json();",
+                      "    pm.expect(body.order_id).to.eql(pm.collectionVariables.get('retry_order_id'));",
+                      "    pm.expect(body.customer_id).to.eql(pm.collectionVariables.get('retry_customer_id'));",
+                      "    pm.expect(Number(body.amount)).to.eql(42.5);",
+                      "    pm.expect(body.currency).to.eql('BRL');",
+                      "    pm.expect(body.status).to.eql('PROCESSED');",
+                      "    pm.expect(body.processed_at).to.be.a('string').and.not.empty;",
+                      "    pm.expect(Number.isNaN(Date.parse(body.processed_at))).to.eql(false);",
+                      "    pm.expect(body.receive_count).to.be.at.least(2);",
+                      "});",
+                      "if (pm.response.code !== 200) {",
+                      "    pm.execution.setNextRequest(null);",
+                      "}",
+                      "",
+                      "}"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "200 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders/{{retry_order_id}}",
+                    "description": "No Runner, aguarda até 150 s e exige receive_count >= 2. O visibility timeout é de 60 s. Execute após 03.01.01."
+                  },
+                  "status": "OK",
+                  "code": 200,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"order_id\": \"00000000-0000-0000-0000-000000000001\",\n  \"customer_id\": \"aluno-01\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"status\": \"PROCESSED\",\n  \"receive_count\": 2,\n  \"processed_at\": \"2026-11-05 15:30:00+00:00\"\n}"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "03.02 | Falha permanente - exercício de DLQ",
+          "description": "Execute POST e GET antes do redrive. Após cerca de três minutos, confirme o UUID na DLQ com a ferramenta do laboratório ou PyTest. 404 isolado não comprova DLQ. Para corrigir: docker compose --profile tools run --rm lab redrive <dlq_order_id>.",
+          "item": [
+            {
+              "id": "e29bedc3-8d38-5f84-89dc-bce6d8cab874",
+              "name": "03.02.01 [202] Criar pedido com falha permanente",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders",
+                "description": "failure_mode=permanent gera falha em todas as tentativas. A API aceita o evento (202); o Worker não o persiste. Salva dlq_order_id. Cada execução gera uma nova mensagem para o exercício de DLQ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"order_id\": \"{{dlq_order_id}}\",\n  \"customer_id\": \"{{dlq_customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"failure_mode\": \"permanent\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.collectionVariables.set('dlq_order_id', pm.variables.replaceIn('{{$guid}}'));",
+                      "pm.collectionVariables.set('dlq_customer_id', pm.variables.get('customer_id'));",
+                      "pm.collectionVariables.set('dlq_poll_count', 0);",
+                      "pm.collectionVariables.unset('dlq_poll_deadline');"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 202: mensagem aceita na fila', () => pm.response.to.have.status(202));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Identificador e estado de aceitação', () => {",
+                      "    const body = pm.response.json();",
+                      "    pm.expect(body.order_id).to.eql(pm.collectionVariables.get('dlq_order_id'));",
+                      "    pm.expect(body.status).to.eql('ACCEPTED');",
+                      "});",
+                      "pm.test('Location identifica o pedido', () => {",
+                      "    pm.expect(pm.response.headers.get('Location')).to.eql('/orders/' + pm.collectionVariables.get('dlq_order_id'));",
+                      "});",
+                      "if (pm.response.code !== 202) {",
+                      "    pm.execution.setNextRequest(null);",
+                      "}"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "202 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      },
+                      {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders",
+                    "description": "failure_mode=permanent gera falha em todas as tentativas. A API aceita o evento (202); o Worker não o persiste. Salva dlq_order_id. Cada execução gera uma nova mensagem para o exercício de DLQ.",
+                    "body": {
+                      "mode": "raw",
+                      "raw": "{\n  \"order_id\": \"{{dlq_order_id}}\",\n  \"customer_id\": \"{{dlq_customer_id}}\",\n  \"amount\": \"42.50\",\n  \"currency\": \"BRL\",\n  \"failure_mode\": \"permanent\"\n}",
+                      "options": {
+                        "raw": {
+                          "language": "json"
+                        }
+                      }
+                    }
+                  },
+                  "status": "Accepted",
+                  "code": 202,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    },
+                    {
+                      "key": "Location",
+                      "value": "/orders/00000000-0000-0000-0000-000000000001"
+                    }
+                  ],
+                  "body": "{\n  \"order_id\": \"00000000-0000-0000-0000-000000000001\",\n  \"status\": \"ACCEPTED\"\n}"
+                }
+              ]
+            },
+            {
+              "id": "bcc4dc8f-804d-5c96-9a41-0e4c8d112ed2",
+              "name": "03.02.02 [404] Pedido com falha ainda não persistido",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{base_url}}/orders/{{dlq_order_id}}",
+                "description": "Execute após 03.02.01 e antes de corrigir/reprocessar. Valida somente ausência de persistência naquele momento: 404 não prova envio à DLQ. Aguarde cerca de três minutos e use lab status/PyTest para localizar a mensagem específica. Após redrive, o esperado passa a ser 200."
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (!pm.collectionVariables.get('dlq_order_id')) {",
+                      "    throw new Error('Execute primeiro o POST deste cenário para gerar o order_id.');",
+                      "}"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('HTTP 404 esperado', () => pm.response.to.have.status(404));",
+                      "pm.test('Resposta JSON', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json'));",
+                      "pm.test('Código de erro: order_not_found', () => pm.expect(pm.response.json().error).to.eql('order_not_found'));"
+                    ]
+                  }
+                }
+              ],
+              "response": [
+                {
+                  "name": "404 - Resposta esperada",
+                  "originalRequest": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "application/json"
+                      }
+                    ],
+                    "url": "{{base_url}}/orders/{{dlq_order_id}}",
+                    "description": "Execute após 03.02.01 e antes de corrigir/reprocessar. Valida somente ausência de persistência naquele momento: 404 não prova envio à DLQ. Aguarde cerca de três minutos e use lab status/PyTest para localizar a mensagem específica. Após redrive, o esperado passa a ser 200."
+                  },
+                  "status": "Not Found",
+                  "code": 404,
+                  "_postman_previewlanguage": "json",
+                  "header": [
+                    {
+                      "key": "Content-Type",
+                      "value": "application/json"
+                    }
+                  ],
+                  "body": "{\n  \"error\": \"order_not_found\"\n}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

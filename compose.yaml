@@ -1,0 +1,83 @@
+name: ${COMPOSE_PROJECT_NAME:-treinamento-backend}
+x-tools: &tools
+  build: .
+  platform: linux/amd64
+  environment: &tools-env
+    AWS_ACCESS_KEY_ID: test
+    AWS_SECRET_ACCESS_KEY: test
+    AWS_DEFAULT_REGION: us-east-1
+    AWS_EC2_METADATA_DISABLED: 'true'
+    AWS_ENDPOINT_URL: http://localstack:4566
+    LAMBDA_AWS_ENDPOINT_URL: http://localstack:4566
+    DATABASE_URL: postgresql://training:training@postgres:5432/orders
+    LAB_OUTPUT_DIR: /app/.local
+    LAB_MANIFEST: /app/.local/manifest.json
+    LOCALSTACK_PUBLIC_URL: http://localhost:${LOCALSTACK_PORT:-4566}
+    LOCALSTACK_INTERNAL_URL: http://localstack:4566
+  volumes:
+    - ./.local:/app/.local
+    - ./reports:/app/reports
+  networks: [lab]
+
+services:
+  localstack:
+    image: ${LOCALSTACK_IMAGE:-localstack/localstack:2026.10.0}
+    ports:
+      - '127.0.0.1:${LOCALSTACK_PORT:-4566}:4566'
+    environment:
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
+      SERVICES: iam,sts,lambda,sqs,apigateway,logs
+      LAMBDA_DOCKER_NETWORK: ${COMPOSE_PROJECT_NAME:-treinamento-backend}-lab
+      AWS_DEFAULT_REGION: us-east-1
+      SQS_ENDPOINT_STRATEGY: path
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [lab]
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request; urllib.request.urlopen('http://localhost:4566/_localstack/health', timeout=4)"]
+      interval: 5s
+      timeout: 4s
+      retries: 36
+      start_period: 15s
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: training
+      POSTGRES_PASSWORD: training
+      POSTGRES_DB: orders
+    ports:
+      - '127.0.0.1:${POSTGRES_PORT:-5433}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./sql/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    networks: [lab]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U training -d orders']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  provision:
+    <<: *tools
+    depends_on:
+      localstack: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    restart: 'no'
+
+  tests:
+    <<: *tools
+    profiles: [test]
+    command: ['python', '-m', 'pytest', '-v', '--junitxml=/app/reports/pytest.xml']
+
+  lab:
+    <<: *tools
+    profiles: [tools]
+    entrypoint: ['python', '-m', 'scripts.lab']
+    command: ['status']
+
+networks:
+  lab:
+    name: ${COMPOSE_PROJECT_NAME:-treinamento-backend}-lab
+volumes:
+  postgres-data:
